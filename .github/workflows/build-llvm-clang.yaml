@@ -85,7 +85,7 @@ jobs:
           CUSTOM_DIR=${GITHUB_WORKSPACE}/REG-LINUX/custom BUILDROOT_DIR=${GITHUB_WORKSPACE}/REG-LINUX/buildroot ${GITHUB_WORKSPACE}/REG-LINUX/scripts/linux/mergeToBR.sh
           
           # Version
-          version="$(sed -n 's/^[ ]*LLVM_PROJECT_VERSION_MAJOR[ ]*=[ ]*\(.*\)$/\1/p' buildroot/package/llvm-project/llvm-project.mk)$(sed -n 's/^[ ]*LLVM_PROJECT_VERSION[ ]*=.*[0-9.]*$/\1/p' buildroot/package/llvm-project/llvm-project.mk)"
+          version="$(sed -n 's/^[ ]*LLVM_PROJECT_VERSION_MAJOR[ ]*=[ ]*\(.*\)$/\1/p' buildroot/package/llvm-project/llvm-project.mk)$(sed -n 's/^[ ]*LLVM_PROJECT_VERSION[ ]*=.*)\(.*\)$/\1/p' buildroot/package/llvm-project/llvm-project.mk)"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "version=${version}"
           
