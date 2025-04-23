@@ -1,4 +1,4 @@
-name: Build llvm-clang
+name: Build toolchain
 
 on:
   workflow_dispatch:
@@ -6,16 +6,6 @@ on:
       packagename:
         description: 'Package to delete (and recompile)'
         required: false
-      usecache:
-        description: 'Use cache to resume previous'
-        required: false
-        type: boolean
-        default: false
-      downloadreleased:
-        description: 'Get released if exists'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
     group: ${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
@@ -33,14 +23,14 @@ env:
 
 jobs:
   build:
-    name: Build llvm-clang
+    name: Build toolchain
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.prepare_step.outputs.version }}
       dorelease: ${{ false || steps.compile_step.outputs.dorelease }}
+      thisARCH: ${{ steps.compile_step.outputs.thisARCH }}
     strategy:
       matrix:
-        platform: [bcm2711, bcm2712, bcm2835, h3, h5, jh7110, k1, rk3288, rk3326, rk3399, rk3588, s905gen3, s812, s922x, asahi, x86_64]
+        platform: [bcm2711, bcm2712, bcm2835, h3, h5, h616, jh7110, k1, rk3288, rk3326, rk3399, rk3588, s905gen3, s812, s922x, asahi, x86_64]
       fail-fast: false
     steps:
       - name: Install pkgs
@@ -69,8 +59,8 @@ jobs:
           remove-codeql: true
           remove-docker-images: true
 
-      - name: Prepare disk
-        id: prepare_step
+      - name: Compile toolchain for ${{ matrix.platform }}
+        id: compile_step
         shell: bash
         run: |
           rm -rf ./REG-LINUX
@@ -84,55 +74,36 @@ jobs:
           # Merge buildroot patches
           CUSTOM_DIR=${GITHUB_WORKSPACE}/REG-LINUX/custom BUILDROOT_DIR=${GITHUB_WORKSPACE}/REG-LINUX/buildroot ${GITHUB_WORKSPACE}/REG-LINUX/scripts/linux/mergeToBR.sh
           
-          # Version
-          version="$(sed -n 's/^[ ]*LLVM_PROJECT_VERSION_MAJOR[ ]*=[ ]*\(.*\)$/\1/p' buildroot/package/llvm-project/llvm-project.mk)$(sed -n 's/^[ ]*LLVM_PROJECT_VERSION[ ]*=.*)\(.*\)$/\1/p' buildroot/package/llvm-project/llvm-project.mk)"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "version=${version}"
-          
-          # Get file if already released and avoid compiling again
-          if ${{ github.event.inputs.downloadreleased }} && wget -q -nd -P "${GITHUB_WORKSPACE}" "https://github.com/${GITHUB_REPOSITORY}/releases/download/${version}/llvm-clang-${version}-${{ matrix.platform }}.tar.gz" && gzip -qt "${GITHUB_WORKSPACE}/llvm-clang-${version}-${{ matrix.platform }}.tar.gz"
-          then
-              echo "docompile=${{ false }}" >> "$GITHUB_OUTPUT"
-          else
-              echo "docompile=${{ true }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Restore cache
-        id: restore_cache
-        if: ${{ github.event.inputs.usecache }} && ${{ steps.prepare_step.outputs.docompile }}
-        uses: actions/cache/restore@v4
-        with:
-          path: REG-LINUX/buildroot/output
-          key: ${{ matrix.os }}-${{ matrix.platform }}-${{ steps.prepare_step.outputs.version }}
-
-      - name: Compile llvm-clang for ${{ matrix.platform }}
-        id: compile_step
-        if: ${{ steps.prepare_step.outputs.docompile }}
-        shell: bash
-        run: |
-          # If cache not restored we need to create build folder
-          mkdir -p REG-LINUX/buildroot/output/build
-          cd REG-LINUX
-          
-          # Delete last package build sub folder to force recompile
+          # Delete last package not finished building sub folder to force recompile
           [ -n "${{ github.event.inputs.packagename }}" ] && rm -rf "${GITHUB_WORKSPACE}/REG-LINUX/buildroot/output/build/${{ github.event.inputs.packagename }}"
           find "${GITHUB_WORKSPACE}/REG-LINUX/buildroot/output/build" -mindepth 1 -maxdepth 1 -type d ! -exec test -e "{}/.stamp_installed" \; -exec rm -rf "{}" \; || true
           
+          # Hijack to get BR2_ARCH
           # After each downloaded package is extracted, delete older and keep latest 3
-          sed -i 's:(TAR_OPTIONS) -:(TAR_OPTIONS) - \&\& find \$\$(DL_DIR) -mindepth 1 -maxdepth 1 -type d -printf "%T\@\\t%p\\n" | sort -g | head -n -3 | cut -f 2- | xargs -r rm -rfv \&\& df -BG --output=avail ./ :' buildroot/package/pkg-generic.mk
+          sed -i 's:(TAR_OPTIONS) -:(TAR_OPTIONS) - \&\& find \$\$(DL_DIR) -mindepth 1 -maxdepth 1 -type d -printf "%T\@\\t%p\\n" | sort -g | head -n -3 | cut -f 2- | xargs -r rm -rfv \&\& df -BG --output=avail ./ \&\& export thisARCH=\$(BR2_ARCH) \&\& echo "thisARCH=\$(BR2_ARCH)":' buildroot/package/pkg-generic.mk
           
           # Disable CCACHE and BR2_PER_PACKAGE_DIRECTORIES
           sed -i "/BR2_CCACHE/d" configs/reglinux-board.common
           sed -i "/BR2_PER_PACKAGE_DIRECTORIES/d" configs/* Makefile
           
+          # Some fixes
+          echo -e "\nsha256  d8d95404f8deeb7ff6992c0df855025062e9e8182bca6daa27ef2e9275d27749  linux-6.12.23.tar.xz" >> buildroot/package/linux-headers/linux-headers.hash
+          
+          # If cache not restored we need to create build folder
+          mkdir -p ${GITHUB_WORKSPACE}/REG-LINUX/buildroot/output/build
+          
           # Build
           ${GITHUB_WORKSPACE}/REG-LINUX/configs/createDefconfig.sh ${GITHUB_WORKSPACE}/REG-LINUX/configs/reglinux-${{ matrix.platform }}
           CCACHE_DISABLE=1 make BR2_EXTERNAL=${GITHUB_WORKSPACE}/REG-LINUX -C ${GITHUB_WORKSPACE}/REG-LINUX/buildroot reglinux-${{ matrix.platform }}_defconfig
-          CCACHE_DISABLE=1 make BR2_EXTERNAL=${GITHUB_WORKSPACE}/REG-LINUX -C ${GITHUB_WORKSPACE}/REG-LINUX/buildroot llvm clang libclc
+          CCACHE_DISABLE=1 make BR2_EXTERNAL=${GITHUB_WORKSPACE}/REG-LINUX -C ${GITHUB_WORKSPACE}/REG-LINUX/buildroot toolchain alsa-lib
           
           # Create package
           cd ${GITHUB_WORKSPACE}/REG-LINUX/buildroot/output
-          zip -9 -s 2g -r "${GITHUB_WORKSPACE}/llvm-clang-${version}-${{ matrix.platform }}.zip" ./
+          
+          echo "thisARCH=\$(BR2_ARCH)"
+          echo "thisARCH=${thisARCH}" >> "$GITHUB_OUTPUT"
+          
+          zip -9 -s 2g -r "${GITHUB_WORKSPACE}/toolchain-${thisARCH}.zip" ./
           echo "dorelease=${{ true }}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifacts
@@ -140,16 +111,8 @@ jobs:
         if: ${{ false || steps.compile_step.outputs.dorelease }}
         uses: actions/upload-artifact@v4
         with:
-          name: llvm-clang-${{ steps.prepare_step.outputs.version }}-${{ matrix.platform }}
-          path: llvm-clang-${{ steps.prepare_step.outputs.version }}-${{ matrix.platform }}.*
-
-      - name: Save cache
-        id: save_cache
-        if: ${{ ! cancelled() && steps.compile_step.outcome == 'failure' }}
-        uses: actions/cache/save@v4
-        with:
-          path: REG-LINUX/buildroot/output
-          key: ${{ matrix.os }}-${{ matrix.platform }}-${{ steps.prepare_step.outputs.version }}-${{ github.run_id }}
+          name: toolchain-${{ steps.compile_step.outputs.thisARCH }}
+          path: toolchain-${{ steps.compile_step.outputs.thisARCH }}.*
 
   create_release:
     name: Create release
@@ -165,8 +128,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@master
         with:
-          files: llvm-clang-${{ needs.build.outputs.version }}-*
-          tag_name: ${{ needs.build.outputs.version }}
+          files: toolchain-${{ needs.build.outputs.thisARCH }}-*
+          tag_name: ${{ needs.build.outputs.thisARCH }}
           prerelease: false
           generate_release_notes: true
-          name: REG-ES binaries ${{ needs.build.outputs.version }}
+          name: REG-ES binaries ${{ needs.build.outputs.thisARCH }}
